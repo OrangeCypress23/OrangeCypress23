@@ -1,0 +1,869 @@
+
+//Used in ToggleFullAuto()
+std::string semiAutoStatus = "IDLING";
+
+DWORD procID;
+HANDLE handle = NULL;
+
+uintptr_t GetModuleBaseAddress(DWORD procId, const wchar_t* modName)
+{
+    uintptr_t modBaseAddr = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, procId);
+    if (hSnap != INVALID_HANDLE_VALUE)
+    {
+        MODULEENTRY32 modEntry;
+        modEntry.dwSize = sizeof(modEntry);
+        if (Module32First(hSnap, &modEntry))
+        {
+            do
+            {
+                if (!_wcsicmp(modEntry.szModule, modName))
+                {
+                    modBaseAddr = (uintptr_t)modEntry.modBaseAddr;
+                    break;
+                }
+            } while (Module32Next(hSnap, &modEntry));
+        }
+    }
+    CloseHandle(hSnap);
+    return modBaseAddr;
+}
+
+uintptr_t FindDMAAddy(HANDLE hProc, uintptr_t ptr, std::vector<unsigned int> offsets)
+{
+    uintptr_t addr = ptr;
+    for (unsigned int i = 0; i < offsets.size(); ++i)
+    {
+        ReadProcessMemory(hProc, (BYTE*)addr, &addr, sizeof(addr), 0);
+        addr += offsets[i];
+    }
+    return addr;
+}
+
+DWORD GetCalculatedAddress(const wchar_t* moduleName, uintptr_t pointer, std::vector<unsigned int> offsets)
+{
+    uintptr_t baseAddress = GetModuleBaseAddress(procID, moduleName);
+    uintptr_t baseWithPtr = baseAddress + pointer;
+    uintptr_t finalAddress = FindDMAAddy(handle, baseWithPtr, offsets);
+    return finalAddress;
+}
+
+DWORD GetCurrentAmmoAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x50, 0x98 });
+}
+
+DWORD GetCurrentHealthAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D526C, { 0x0, 0xBC, 0xFC });
+}
+
+DWORD GetCurrentReloadAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x68 });
+}
+
+DWORD GetCurrentReloadAnimAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x78 });
+}
+
+void SetAmmunition()
+{
+    ammoAddress = GetCurrentAmmoAddress();
+    WriteProcessMemory(handle, (LPVOID)ammoAddress, &ammoCount, sizeof(ammoCount), 0);
+    Sleep(50);
+}
+
+void SetHealth()
+{
+    healthAddress = GetCurrentHealthAddress();
+    WriteProcessMemory(handle, (LPVOID)healthAddress, &healthPoints, sizeof(healthPoints), 0);
+    Sleep(50);
+}
+
+///Gets the process ID for the foreground window. Used in ToggleFullAuto() function.
+DWORD GetForegroundWindowProcID()
+{
+    DWORD pid;
+    HWND foregroundWindow = GetForegroundWindow();
+    GetWindowThreadProcessId(foregroundWindow, &pid);
+    return pid;
+}
+
+///Responsible for allowing the user to shoot semi automatic weapons in a fully automated manner. Not too different from a "turbo" button on a controller.
+void ToggleFullAuto()
+{
+    INPUT Input = { 0 };
+    if (GetForegroundWindowProcID() == procID && GetKeyState(0x52) & 0x8000) //If game window is focused and user is holding "R"...
+    {
+        //Release left mouse button.
+        semiAutoStatus = "RELEASING";
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        //Press left mouse button.
+        semiAutoStatus = "FIRING";
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        Sleep(1);
+    }
+    else if (GetForegroundWindowProcID() == procID && semiAutoStatus == "FIRING") //Stops the function from continuing to fire after key is released.
+    {
+        //Release left mouse button.
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+        semiAutoStatus = "IDLING";
+        Sleep(100);
+    }
+    else //If this wasn't here, CPU usage would skyrocket up 10%.
+    {
+        Sleep(100);
+    }
+}
+
+///This method disables reloading on weapons like the shotgun and rocket launcher. It also has the unexpected effect of enabling rapid fire on fully auto guns.
+void SetNoReloadRapidFire()
+{
+    reloadAddress = GetCurrentReloadAddress();
+    reloadAnimAddress = GetCurrentReloadAnimAddress();
+    WriteProcessMemory(handle, (LPVOID)reloadAddress, &reloadIndicator, sizeof(reloadIndicator), 0);
+    WriteProcessMemory(handle, (LPVOID)reloadAnimAddress, &reloadAnimIndator, sizeof(reloadAnimIndator), 0);
+    Sleep(20);
+}
+
+///Used as a thread. Responsible for setting unlimited variables such as ammo and health.
+void SetUnlimitedVals()
+{
+    while (true)
+    {
+        SetAmmunition();
+        SetHealth();
+    }
+}
+
+///Used as a thread. Responsible for changing addresses that alter the mechanics of the game.
+void SetGameMechanics()
+{
+    while (true)
+    {
+        SetNoReloadRapidFire();
+    }
+}
+
+///Used as a thread. Responsible for enhancing game functionality outside of changing values of memory addresses.
+void ExternalMechanics()
+{
+    while (true)
+    {
+        ToggleFullAuto();
+    }
+}
+
+///Program starting point.
+int main()
+{
+    HWND hwnd = FindWindowA(NULL, "Bitsturbed");
+    if (hwnd == NULL)
+    {
+        std::cout << "Game not running!" << std::endl;
+        Sleep(3000);
+        exit(-1);
+    }
+    else
+    {
+        GetWindowThreadProcessId(hwnd, &procID);
+        handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, procID);
+        if (procID == NULL)
+        {
+            std::cout << "Could not obtain process." << std::endl;
+            Sleep(3000);
+            exit(-1);
+        }
+        else
+        {
+            std::thread setUnlimitedVals(SetUnlimitedVals);
+            std::thread setGameMechanics(SetGameMechanics);
+            std::thread externalMechanics(ExternalMechanics);
+            while (true)
+            {
+                std::cout << "Current Ammo Address: " << (LPVOID)ammoAddress << std::endl;
+                std::cout << "Current Health Address: " << (LPVOID)healthAddress << std::endl;
+                std::cout << "Current Reload Address: " << (LPVOID)reloadAddress << std::endl;
+                std::cout << "Current Reload Animation Address: " << (LPVOID)reloadAnimAddress << std::endl;
+                std::cout << "Full-Auto Bot Status: " << semiAutoStatus << std::endl;
+                std::cout << "Hold R to fire full-auto on semi-auto weapon." << std::endl;
+                system("cls");
+            }
+        }
+    }
+}
+#include <iostream>
+#include <Windows.h>
+#include <thread>
+#include <TlHelp32.h>
+#include <tchar.h>
+#include <vector>
+
+//Values to Set
+int ammoCount = 999999
+int healthPoints = 999999;
+int reloadIndicator = 1337; //Can be anything except for 0.
+int reloadAnimIndator = 1337; //Can be anything except for 0.
+
+//Addresses
+DWORD ammoAddress = NULL;
+DWORD healthAddress = NULL;
+DWORD reloadAddress = NULL;
+DWORD reloadAnimAddress = NULL;
+
+//Used in ToggleFullAuto()
+std::string semiAutoStatus = "IDLING";
+
+DWORD procID;
+HANDLE handle = NULL;
+
+uintptr_t GetModuleBaseAddress(DWORD procId, const wchar_t* modName)
+{
+    uintptr_t modBaseAddr = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, procId);
+    if (hSnap != INVALID_HANDLE_VALUE)
+    {
+        MODULEENTRY32 modEntry;
+        modEntry.dwSize = sizeof(modEntry);
+        if (Module32First(hSnap, &modEntry))
+        {
+            do
+            {
+                if (!_wcsicmp(modEntry.szModule, modName))
+                {
+                    modBaseAddr = (uintptr_t)modEntry.modBaseAddr;
+                    break;
+                }
+            } while (Module32Next(hSnap, &modEntry));
+        }
+    }
+    CloseHandle(hSnap);
+    return modBaseAddr;
+}
+
+uintptr_t FindDMAAddy(HANDLE hProc, uintptr_t ptr, std::vector<unsigned int> offsets)
+{
+    uintptr_t addr = ptr;
+    for (unsigned int i = 0; i < offsets.size(); ++i)
+    {
+        ReadProcessMemory(hProc, (BYTE*)addr, &addr, sizeof(addr), 0);
+        addr += offsets[i];
+    }
+    return addr;
+}
+
+DWORD GetCalculatedAddress(const wchar_t* moduleName, uintptr_t pointer, std::vector<unsigned int> offsets)
+{
+    uintptr_t baseAddress = GetModuleBaseAddress(procID, moduleName);
+    uintptr_t baseWithPtr = baseAddress + pointer;
+    uintptr_t finalAddress = FindDMAAddy(handle, baseWithPtr, offsets);
+    return finalAddress;
+}
+
+DWORD GetCurrentAmmoAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x50, 0x98 });
+}
+
+DWORD GetCurrentHealthAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D526C, { 0x0, 0xBC, 0xFC });
+}
+
+DWORD GetCurrentReloadAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x68 });
+}
+
+DWORD GetCurrentReloadAnimAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x78 });
+}
+
+void SetAmmunition()
+{
+    ammoAddress = GetCurrentAmmoAddress();
+    WriteProcessMemory(handle, (LPVOID)ammoAddress, &ammoCount, sizeof(ammoCount), 0);
+    Sleep(50);
+}
+
+void SetHealth()
+{
+    healthAddress = GetCurrentHealthAddress();
+    WriteProcessMemory(handle, (LPVOID)healthAddress, &healthPoints, sizeof(healthPoints), 0);
+    Sleep(50);
+}
+
+///Gets the process ID for the foreground window. Used in ToggleFullAuto() function.
+DWORD GetForegroundWindowProcID()
+{
+    DWORD pid;
+    HWND foregroundWindow = GetForegroundWindow();
+    GetWindowThreadProcessId(foregroundWindow, &pid);
+    return pid;
+}
+
+///Responsible for allowing the user to shoot semi automatic weapons in a fully automated manner. Not too different from a "turbo" button on a controller.
+void ToggleFullAuto()
+{
+    INPUT Input = { 0 };
+    if (GetForegroundWindowProcID() == procID && GetKeyState(0x52) & 0x8000) //If game window is focused and user is holding "R"...
+    {
+        //Release left mouse button.
+        semiAutoStatus = "RELEASING";
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        //Press left mouse button.
+        semiAutoStatus = "FIRING";
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        Sleep(1);
+    }
+    else if (GetForegroundWindowProcID() == procID && semiAutoStatus == "FIRING") //Stops the function from continuing to fire after key is released.
+    {
+        //Release left mouse button.
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+        semiAutoStatus = "IDLING";
+        Sleep(100);
+    }
+    else //If this wasn't here, CPU usage would skyrocket up 10%.
+    {
+        Sleep(100);
+    }
+}
+
+///This method disables reloading on weapons like the shotgun and rocket launcher. It also has the unexpected effect of enabling rapid fire on fully auto guns.
+void SetNoReloadRapidFire()
+{
+    reloadAddress = GetCurrentReloadAddress();
+    reloadAnimAddress = GetCurrentReloadAnimAddress();
+    WriteProcessMemory(handle, (LPVOID)reloadAddress, &reloadIndicator, sizeof(reloadIndicator), 0);
+    WriteProcessMemory(handle, (LPVOID)reloadAnimAddress, &reloadAnimIndator, sizeof(reloadAnimIndator), 0);
+    Sleep(20);
+}
+
+///Used as a thread. Responsible for setting unlimited variables such as ammo and health.
+void SetUnlimitedVals()
+{
+    while (true)
+    {
+        SetAmmunition();
+        SetHealth();
+    }
+}
+
+///Used as a thread. Responsible for changing addresses that alter the mechanics of the game.
+void SetGameMechanics()
+{
+    while (true)
+    {
+        SetNoReloadRapidFire();
+    }
+}
+
+///Used as a thread. Responsible for enhancing game functionality outside of changing values of memory addresses.
+void ExternalMechanics()
+{
+    while (true)
+    {
+        ToggleFullAuto();
+    }
+}
+
+///Program starting point.
+int main()
+{
+    HWND hwnd = FindWindowA(NULL, "Bitsturbed");
+    if (hwnd == NULL)
+    {
+        std::cout << "Game not running!" << std::endl;
+        Sleep(3000);
+        exit(-1);
+    }
+    else
+    {
+        GetWindowThreadProcessId(hwnd, &procID);
+        handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, procID);
+        if (procID == NULL)
+        {
+            std::cout << "Could not obtain process." << std::endl;
+            Sleep(3000);
+            exit(-1);
+        }
+        else
+        {
+            std::thread setUnlimitedVals(SetUnlimitedVals);
+            std::thread setGameMechanics(SetGameMechanics);
+            std::thread externalMechanics(ExternalMechanics);
+            while (true)
+            {
+                std::cout << "Current Ammo Address: " << (LPVOID)ammoAddress << std::endl;
+                std::cout << "Current Health Address: " << (LPVOID)healthAddress << std::endl;
+                std::cout << "Current Reload Address: " << (LPVOID)reloadAddress << std::endl;
+                std::cout << "Current Reload Animation Address: " << (LPVOID)reloadAnimAddress << std::endl;
+                std::cout << "Full-Auto Bot Status: " << semiAutoStatus << std::endl;
+                std::cout << "Hold R to fire full-auto on semi-auto weapon." << std::endl;
+                system("cls");
+            }
+        }
+    }
+}
+
+//Used in ToggleFullAuto()
+std::string semiAutoStatus = "IDLING";
+
+DWORD procID;
+HANDLE handle = NULL;
+
+uintptr_t GetModuleBaseAddress(DWORD procId, const wchar_t* modName)
+{
+    uintptr_t modBaseAddr = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, procId);
+    if (hSnap != INVALID_HANDLE_VALUE)
+    {
+        MODULEENTRY32 modEntry;
+        modEntry.dwSize = sizeof(modEntry);
+        if (Module32First(hSnap, &modEntry))
+        {
+            do
+            {
+                if (!_wcsicmp(modEntry.szModule, modName))
+                {
+                    modBaseAddr = (uintptr_t)modEntry.modBaseAddr;
+                    break;
+                }
+            } while (Module32Next(hSnap, &modEntry));
+        }
+    }
+    CloseHandle(hSnap);
+    return modBaseAddr;
+}
+
+uintptr_t FindDMAAddy(HANDLE hProc, uintptr_t ptr, std::vector<unsigned int> offsets)
+{
+    uintptr_t addr = ptr;
+    for (unsigned int i = 0; i < offsets.size(); ++i)
+    {
+        ReadProcessMemory(hProc, (BYTE*)addr, &addr, sizeof(addr), 0);
+        addr += offsets[i];
+    }
+    return addr;
+}
+
+DWORD GetCalculatedAddress(const wchar_t* moduleName, uintptr_t pointer, std::vector<unsigned int> offsets)
+{
+    uintptr_t baseAddress = GetModuleBaseAddress(procID, moduleName);
+    uintptr_t baseWithPtr = baseAddress + pointer;
+    uintptr_t finalAddress = FindDMAAddy(handle, baseWithPtr, offsets);
+    return finalAddress;
+}
+
+DWORD GetCurrentAmmoAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x50, 0x98 });
+}
+
+DWORD GetCurrentHealthAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D526C, { 0x0, 0xBC, 0xFC });
+}
+
+DWORD GetCurrentReloadAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x68 });
+}
+
+DWORD GetCurrentReloadAnimAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x78 });
+}
+
+void SetAmmunition()
+{
+    ammoAddress = GetCurrentAmmoAddress();
+    WriteProcessMemory(handle, (LPVOID)ammoAddress, &ammoCount, sizeof(ammoCount), 0);
+    Sleep(50);
+}
+
+void SetHealth()
+{
+    healthAddress = GetCurrentHealthAddress();
+    WriteProcessMemory(handle, (LPVOID)healthAddress, &healthPoints, sizeof(healthPoints), 0);
+    Sleep(50);
+}
+
+///Gets the process ID for the foreground window. Used in ToggleFullAuto() function.
+DWORD GetForegroundWindowProcID()
+{
+    DWORD pid;
+    HWND foregroundWindow = GetForegroundWindow();
+    GetWindowThreadProcessId(foregroundWindow, &pid);
+    return pid;
+}
+
+///Responsible for allowing the user to shoot semi automatic weapons in a fully automated manner. Not too different from a "turbo" button on a controller.
+void ToggleFullAuto()
+{
+    INPUT Input = { 0 };
+    if (GetForegroundWindowProcID() == procID && GetKeyState(0x52) & 0x8000) //If game window is focused and user is holding "R"...
+    {
+        //Release left mouse button.
+        semiAutoStatus = "RELEASING";
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        //Press left mouse button.
+        semiAutoStatus = "FIRING";
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        Sleep(1);
+    }
+    else if (GetForegroundWindowProcID() == procID && semiAutoStatus == "FIRING") //Stops the function from continuing to fire after key is released.
+    {
+        //Release left mouse button.
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+        semiAutoStatus = "IDLING";
+        Sleep(100);
+    }
+    else //If this wasn't here, CPU usage would skyrocket up 10%.
+    {
+        Sleep(100);
+    }
+}
+
+///This method disables reloading on weapons like the shotgun and rocket launcher. It also has the unexpected effect of enabling rapid fire on fully auto guns.
+void SetNoReloadRapidFire()
+{
+    reloadAddress = GetCurrentReloadAddress();
+    reloadAnimAddress = GetCurrentReloadAnimAddress();
+    WriteProcessMemory(handle, (LPVOID)reloadAddress, &reloadIndicator, sizeof(reloadIndicator), 0);
+    WriteProcessMemory(handle, (LPVOID)reloadAnimAddress, &reloadAnimIndator, sizeof(reloadAnimIndator), 0);
+    Sleep(20);
+}
+
+///Used as a thread. Responsible for setting unlimited variables such as ammo and health.
+void SetUnlimitedVals()
+{
+    while (true)
+    {
+        SetAmmunition();
+        SetHealth();
+    }
+}
+
+///Used as a thread. Responsible for changing addresses that alter the mechanics of the game.
+void SetGameMechanics()
+{
+    while (true)
+    {
+        SetNoReloadRapidFire();
+    }
+}
+
+///Used as a thread. Responsible for enhancing game functionality outside of changing values of memory addresses.
+void ExternalMechanics()
+{
+    while (true)
+    {
+        ToggleFullAuto();
+    }
+}
+
+///Program starting point.
+int main()
+{
+    HWND hwnd = FindWindowA(NULL, "Bitsturbed");
+    if (hwnd == NULL)
+    {
+        std::cout << "Game not running!" << std::endl;
+        Sleep(3000);
+        exit(-1);
+    }
+    else
+    {
+        GetWindowThreadProcessId(hwnd, &procID);
+        handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, procID);
+        if (procID == NULL)
+        {
+            std::cout << "Could not obtain process." << std::endl;
+            Sleep(3000);
+            exit(-1);
+        }
+        else
+        {
+            std::thread setUnlimitedVals(SetUnlimitedVals);
+            std::thread setGameMechanics(SetGameMechanics);
+            std::thread externalMechanics(ExternalMechanics);
+            while (true)
+            {
+                std::cout << "Current Ammo Address: " << (LPVOID)ammoAddress << std::endl;
+                std::cout << "Current Health Address: " << (LPVOID)healthAddress << std::endl;
+                std::cout << "Current Reload Address: " << (LPVOID)reloadAddress << std::endl;
+                std::cout << "Current Reload Animation Address: " << (LPVOID)reloadAnimAddress << std::endl;
+                std::cout << "Full-Auto Bot Status: " << semiAutoStatus << std::endl;
+                std::cout << "Hold R to fire full-auto on semi-auto weapon." << std::endl;
+                system("cls");
+            }
+        }
+    }
+}
+//Used in ToggleFullAuto()
+std::string semiAutoStatus = "IDLING";
+
+DWORD procID;
+HANDLE handle = NULL;
+
+uintptr_t GetModuleBaseAddress(DWORD procId, const wchar_t* modName)
+{
+    uintptr_t modBaseAddr = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, procId);
+    if (hSnap != INVALID_HANDLE_VALUE)
+    {
+        MODULEENTRY32 modEntry;
+        modEntry.dwSize = sizeof(modEntry);
+        if (Module32First(hSnap, &modEntry))
+        {
+            do
+            {
+                if (!_wcsicmp(modEntry.szModule, modName))
+                {
+                    modBaseAddr = (uintptr_t)modEntry.modBaseAddr;
+                    break;
+                }
+            } while (Module32Next(hSnap, &modEntry));
+        }
+    }
+    CloseHandle(hSnap);
+    return modBaseAddr;
+}
+
+uintptr_t FindDMAAddy(HANDLE hProc, uintptr_t ptr, std::vector<unsigned int> offsets)
+{
+    uintptr_t addr = ptr;
+    for (unsigned int i = 0; i < offsets.size(); ++i)
+    {
+        ReadProcessMemory(hProc, (BYTE*)addr, &addr, sizeof(addr), 0);
+        addr += offsets[i];
+    }
+    return addr;
+}
+
+DWORD GetCalculatedAddress(const wchar_t* moduleName, uintptr_t pointer, std::vector<unsigned int> offsets)
+{
+    uintptr_t baseAddress = GetModuleBaseAddress(procID, moduleName);
+    uintptr_t baseWithPtr = baseAddress + pointer;
+    uintptr_t finalAddress = FindDMAAddy(handle, baseWithPtr, offsets);
+    return finalAddress;
+}
+
+DWORD GetCurrentAmmoAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x50, 0x98 });
+}
+
+DWORD GetCurrentHealthAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D526C, { 0x0, 0xBC, 0xFC });
+}
+
+DWORD GetCurrentReloadAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x68 });
+}
+
+DWORD GetCurrentReloadAnimAddress()
+{
+    return GetCalculatedAddress(L"miniFPS.exe", 0x001D525C, { 0x78 });
+}
+
+void SetAmmunition()
+{
+    ammoAddress = GetCurrentAmmoAddress();
+    WriteProcessMemory(handle, (LPVOID)ammoAddress, &ammoCount, sizeof(ammoCount), 0);
+    Sleep(50);
+}
+
+void SetHealth()
+{
+    healthAddress = GetCurrentHealthAddress();
+    WriteProcessMemory(handle, (LPVOID)healthAddress, &healthPoints, sizeof(healthPoints), 0);
+    Sleep(50);
+}
+
+///Gets the process ID for the foreground window. Used in ToggleFullAuto() function.
+DWORD GetForegroundWindowProcID()
+{
+    DWORD pid;
+    HWND foregroundWindow = GetForegroundWindow();
+    GetWindowThreadProcessId(foregroundWindow, &pid);
+    return pid;
+}
+
+///Responsible for allowing the user to shoot semi automatic weapons in a fully automated manner. Not too different from a "turbo" button on a controller.
+void ToggleFullAuto()
+{
+    INPUT Input = { 0 };
+    if (GetForegroundWindowProcID() == procID && GetKeyState(0x52) & 0x8000) //If game window is focused and user is holding "R"...
+    {
+        //Release left mouse button.
+        semiAutoStatus = "RELEASING";
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        //Press left mouse button.
+        semiAutoStatus = "FIRING";
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        ::SendInput(1, &Input, sizeof(INPUT));
+
+        Sleep(1);
+    }
+    else if (GetForegroundWindowProcID() == procID && semiAutoStatus == "FIRING") //Stops the function from continuing to fire after key is released.
+    {
+        //Release left mouse button.
+        ::ZeroMemory(&Input, sizeof(INPUT));
+        Input.type = INPUT_MOUSE;
+        Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        ::SendInput(1, &Input, sizeof(INPUT));
+        semiAutoStatus = "IDLING";
+        Sleep(100);
+    }
+    else //If this wasn't here, CPU usage would skyrocket up 10%.
+    {
+        Sleep(100);
+    }
+}
+
+///This method disables reloading on weapons like the shotgun and rocket launcher. It also has the unexpected effect of enabling rapid fire on fully auto guns.
+void SetNoReloadRapidFire()
+{
+    reloadAddress = GetCurrentReloadAddress();
+    reloadAnimAddress = GetCurrentReloadAnimAddress();
+    WriteProcessMemory(handle, (LPVOID)reloadAddress, &reloadIndicator, sizeof(reloadIndicator), 0);
+    WriteProcessMemory(handle, (LPVOID)reloadAnimAddress, &reloadAnimIndator, sizeof(reloadAnimIndator), 0);
+    Sleep(20);
+}
+
+///Used as a thread. Responsible for setting unlimited variables such as ammo and health.
+void SetUnlimitedVals()
+{
+    while (true)
+    {
+        SetAmmunition();
+        SetHealth();
+    }
+}
+
+///Used as a thread. Responsible for changing addresses that alter the mechanics of the game.
+void SetGameMechanics()
+{
+    while (true)
+    {
+        SetNoReloadRapidFire();
+    }
+}
+
+///Used as a thread. Responsible for enhancing game functionality outside of changing values of memory addresses.
+void ExternalMechanics()
+{
+    while (true)
+    {
+        ToggleFullAuto();
+    }
+}
+
+///Program starting point.
+int main()
+{
+    HWND hwnd = FindWindowA(NULL, "Bitsturbed");
+    if (hwnd == NULL)
+    {
+        std::cout << "Game not running!" << std::endl;
+        Sleep(3000);
+        exit(-1);
+    }
+    else
+    {
+        GetWindowThreadProcessId(hwnd, &procID);
+        handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, procID);
+        if (procID == NULL)
+        {
+            std::cout << "Could not obtain process." << std::endl;
+            Sleep(3000);
+            exit(-1);
+        }
+        else
+        {
+            std::thread setUnlimitedVals(SetUnlimitedVals);
+            std::thread setGameMechanics(SetGameMechanics);
+            std::thread externalMechanics(ExternalMechanics);
+            while (true)
+            {
+                std::cout << "Current Ammo Address: " << (LPVOID)ammoAddress << std::endl;
+                std::cout << "Current Health Address: " << (LPVOID)healthAddress << std::endl;
+                std::cout << "Current Reload Address: " << (LPVOID)reloadAddress << std::endl;
+                std::cout << "Current Reload Animation Address: " << (LPVOID)reloadAnimAddress << std::endl;
+                std::cout << "Full-Auto Bot Status: " << semiAutoStatus << std::endl;
+                std::cout << "Hold R to fire full-auto on semi-auto weapon." << std::endl;
+                system("cls");
+            }
+        }
+    }
+}
+float RadianToDegree(float radian)
+{
+    return radian * (180 / PI);
+}
+
+float DegreeToRadian(float degree)
+{
+    return degree * (PI / 180);
+
+}
+
+vec3 RadianToDegree(vec3 radians)
+{
+    vec3 degrees;
+    degrees.x = radians.x * (180 / PI);
+    degrees.y = radians.y * (180 / PI);
+    degrees.z = radians.z * (180 / PI);
+    return degrees;
+}
+
+vec3 DegreeToRadian(vec3 degrees)
+{
+    vec3 radians;
+    radians.x = degrees.x * (PI / 180);
+    radians.y = degrees.y * (PI / 180);
+    radians.z = degrees.z * (PI / 180);
+    return radians;
+}
